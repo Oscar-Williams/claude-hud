@@ -132,7 +132,8 @@ class Parser {
   private skills = new Set<string>();
   private mcpServers = new Set<string>();
   private mcpErrors = new Set<string>();
-  private todos: TodoItem[] = [];
+  // Deleted slots keep later numeric task IDs from moving or being reused.
+  private todos: (TodoItem | null)[] = [];
   private taskIndex = new Map<string, number>();
   private agentCompletions = new Map<string, Date>();
   // Some task-notifications omit <tool-use-id>, carrying only <task-id> (= the
@@ -282,8 +283,13 @@ class Parser {
       const taskId = typeof input?.taskId === 'string' || typeof input?.taskId === 'number' ? String(input.taskId) : block.id;
       if (taskId) this.taskIndex.set(taskId, this.todos.length - 1);
     } else if (toolName === 'TaskUpdate') {
-      const todo = this.todos[this.findTask(input?.taskId) ?? -1];
+      const index = this.findTask(input?.taskId) ?? -1;
+      const todo = this.todos[index];
       if (!todo) return;
+      if (input?.status === 'deleted') {
+        this.todos[index] = null;
+        return;
+      }
       const status = taskStatus(input?.status);
       if (status) todo.status = status;
       const content = text(input?.subject) ?? text(input?.description);
@@ -342,7 +348,7 @@ class Parser {
     }
     this.todos = [...next];
     this.taskIndex.clear();
-    this.todos.forEach((todo, index) => {
+    next.forEach((todo, index) => {
       const taskId = idsByContent.get(todo.content)?.shift();
       if (taskId) this.taskIndex.set(taskId, index);
     });
@@ -414,7 +420,7 @@ class Parser {
       skills: [...this.skills],
       mcpServers: [...this.mcpServers],
       mcpErrors: [...this.mcpErrors],
-      todos: this.todos,
+      todos: this.todos.filter((todo): todo is TodoItem => todo !== null),
       sessionTokens,
     };
   }
