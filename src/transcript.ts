@@ -280,6 +280,14 @@ class Parser {
     } else if (toolName === 'TaskCreate') {
       const content = text(input?.subject) ?? text(input?.description);
       this.todos.push({ content: content ?? 'Untitled task', status: taskStatus(input?.status) ?? 'pending' });
+      if (this.todos.includes(null)) {
+        let nextId = this.todos.length;
+        for (const id of this.taskIndex.keys()) {
+          const numeric = /^\d+$/.test(id) ? Number(id) : NaN;
+          if (Number.isSafeInteger(numeric)) nextId = Math.max(nextId, numeric + 1);
+        }
+        this.taskIndex.set(String(nextId), this.todos.length - 1);
+      }
       const taskId = typeof input?.taskId === 'string' || typeof input?.taskId === 'number' ? String(input.taskId) : block.id;
       if (taskId) this.taskIndex.set(taskId, this.todos.length - 1);
     } else if (toolName === 'TaskUpdate') {
@@ -287,6 +295,7 @@ class Parser {
       const todo = this.todos[index];
       if (!todo) return;
       if (input?.status === 'deleted') {
+        this.rememberNumericTasks();
         this.todos[index] = null;
         return;
       }
@@ -337,20 +346,41 @@ class Parser {
     }
   }
 
+  // Freeze positional IDs before deletion makes the array differ from the task list.
+  private rememberNumericTasks(): void {
+    this.todos.forEach((_, index) => {
+      const id = String(index + 1);
+      if (!this.taskIndex.has(id)) this.taskIndex.set(id, index);
+    });
+  }
+
   // TodoWrite replaces the list; TaskCreate ids follow their todo by content, in order,
   // so duplicate-content todos each keep their own id.
   private replaceTodos(next: TodoItem[]): void {
-    const idsByContent = new Map<string, string[]>();
-    for (const [taskId, index] of [...this.taskIndex].sort((a, b) => a[1] - b[1])) {
+    if (this.todos.includes(null)) this.rememberNumericTasks();
+    const idsByIndex = new Map<number, string[]>();
+    for (const [taskId, index] of this.taskIndex) {
+      if (!this.todos[index]) continue;
+      idsByIndex.set(index, [...(idsByIndex.get(index) ?? []), taskId]);
+    }
+    const idsByContent = new Map<string, string[][]>();
+    for (const [index, ids] of [...idsByIndex].sort((a, b) => a[0] - b[0])) {
       const content = this.todos[index]?.content;
       if (content === undefined) continue;
-      idsByContent.set(content, [...(idsByContent.get(content) ?? []), taskId]);
+      idsByContent.set(content, [...(idsByContent.get(content) ?? []), ids]);
     }
-    this.todos = [...next];
-    this.taskIndex.clear();
-    next.forEach((todo, index) => {
-      const taskId = idsByContent.get(todo.content)?.shift();
-      if (taskId) this.taskIndex.set(taskId, index);
+    // Keep deleted positions when TodoWrite replaces the visible list.
+    const todos: (TodoItem | null)[] = [...next];
+    this.todos.forEach((todo, index) => {
+      if (todo === null) todos.splice(index, 0, null);
+    });
+    this.todos = todos;
+    // A known retired ID must not fall back to another task at its old position.
+    for (const id of this.taskIndex.keys()) this.taskIndex.set(id, -1);
+    this.todos.forEach((todo, index) => {
+      if (!todo) return;
+      const ids = idsByContent.get(todo.content)?.shift() ?? [];
+      for (const taskId of ids) this.taskIndex.set(taskId, index);
     });
   }
 
