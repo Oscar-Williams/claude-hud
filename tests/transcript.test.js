@@ -338,6 +338,21 @@ test('numeric task IDs survive deletion and TodoWrite, including after a saved c
   }
 });
 
+test('numeric task IDs follow their task through a TodoWrite reorder without any deletion', async () => {
+  const r = await parse([
+    toolUse('c1', 'TaskCreate', { subject: 'A' }),
+    toolUse('c2', 'TaskCreate', { subject: 'B' }),
+    toolUse('c3', 'TaskCreate', { subject: 'C' }),
+    toolUse('reorder', 'TodoWrite', { todos: [
+      { content: 'B', status: 'pending' }, { content: 'A', status: 'pending' }, { content: 'C', status: 'pending' },
+    ] }),
+    toolUse('a', 'TaskUpdate', { taskId: '1', status: 'completed' }),
+  ]);
+  assert.deepEqual(r.todos, [
+    { content: 'B', status: 'pending' }, { content: 'A', status: 'completed' }, { content: 'C', status: 'pending' },
+  ]);
+});
+
 test('numeric task IDs follow reordered tasks and are not reused after clearing todos', async () => {
   const first = [
     toolUse('c1', 'TaskCreate', { subject: 'Discarded' }),

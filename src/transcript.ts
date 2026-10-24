@@ -132,9 +132,11 @@ class Parser {
   private skills = new Set<string>();
   private mcpServers = new Set<string>();
   private mcpErrors = new Set<string>();
-  // Deleted slots keep later numeric task IDs from moving or being reused.
-  private todos: (TodoItem | null)[] = [];
+  private todos: TodoItem[] = [];
+  // Task id -> index in todos; -1 marks a task that was deleted or dropped by TodoWrite.
   private taskIndex = new Map<string, number>();
+  // Claude Code numbers TaskCreate tasks 1, 2, 3... and never reuses a number.
+  private nextTaskId = 1;
   private agentCompletions = new Map<string, Date>();
   // Some task-notifications omit <tool-use-id>, carrying only <task-id> (= the
   // launch toolUseResult's agentId). Map agentId -> toolUseId from the launch
@@ -280,23 +282,16 @@ class Parser {
     } else if (toolName === 'TaskCreate') {
       const content = text(input?.subject) ?? text(input?.description);
       this.todos.push({ content: content ?? 'Untitled task', status: taskStatus(input?.status) ?? 'pending' });
-      if (this.todos.includes(null)) {
-        let nextId = this.todos.length;
-        for (const id of this.taskIndex.keys()) {
-          const numeric = /^\d+$/.test(id) ? Number(id) : NaN;
-          if (Number.isSafeInteger(numeric)) nextId = Math.max(nextId, numeric + 1);
-        }
-        this.taskIndex.set(String(nextId), this.todos.length - 1);
-      }
-      const taskId = typeof input?.taskId === 'string' || typeof input?.taskId === 'number' ? String(input.taskId) : block.id;
-      if (taskId) this.taskIndex.set(taskId, this.todos.length - 1);
+      const numbered = String(this.nextTaskId++);
+      const explicit = typeof input?.taskId === 'string' || typeof input?.taskId === 'number' ? String(input.taskId) : null;
+      for (const id of explicit ? [explicit] : [numbered, block.id as string]) this.taskIndex.set(id, this.todos.length - 1);
     } else if (toolName === 'TaskUpdate') {
       const index = this.findTask(input?.taskId) ?? -1;
       const todo = this.todos[index];
       if (!todo) return;
       if (input?.status === 'deleted') {
-        this.rememberNumericTasks();
-        this.todos[index] = null;
+        this.todos.splice(index, 1);
+        this.moveTasks((i) => (i === index ? -1 : i > index ? i - 1 : i));
         return;
       }
       const status = taskStatus(input?.status);
@@ -346,42 +341,24 @@ class Parser {
     }
   }
 
-  // Freeze positional IDs before deletion makes the array differ from the task list.
-  private rememberNumericTasks(): void {
-    this.todos.forEach((_, index) => {
-      const id = String(index + 1);
-      if (!this.taskIndex.has(id)) this.taskIndex.set(id, index);
+  // TodoWrite replaces the list. Each todo takes over the ids of the first unclaimed old todo
+  // with the same content, so duplicate-content todos each keep their own; dropped todos' ids retire.
+  private replaceTodos(next: TodoItem[]): void {
+    const oldByContent = new Map<string, number[]>();
+    this.todos.forEach((todo, index) => oldByContent.set(todo.content, [...(oldByContent.get(todo.content) ?? []), index]));
+    const moved = new Map<number, number>();
+    next.forEach((todo, index) => {
+      const old = oldByContent.get(todo.content)?.shift();
+      if (old !== undefined) moved.set(old, index);
     });
+    this.todos = [...next];
+    this.moveTasks((index) => moved.get(index) ?? -1);
   }
 
-  // TodoWrite replaces the list; TaskCreate ids follow their todo by content, in order,
-  // so duplicate-content todos each keep their own id.
-  private replaceTodos(next: TodoItem[]): void {
-    if (this.todos.includes(null)) this.rememberNumericTasks();
-    const idsByIndex = new Map<number, string[]>();
-    for (const [taskId, index] of this.taskIndex) {
-      if (!this.todos[index]) continue;
-      idsByIndex.set(index, [...(idsByIndex.get(index) ?? []), taskId]);
-    }
-    const idsByContent = new Map<string, string[][]>();
-    for (const [index, ids] of [...idsByIndex].sort((a, b) => a[0] - b[0])) {
-      const content = this.todos[index]?.content;
-      if (content === undefined) continue;
-      idsByContent.set(content, [...(idsByContent.get(content) ?? []), ids]);
-    }
-    // Keep deleted positions when TodoWrite replaces the visible list.
-    const todos: (TodoItem | null)[] = [...next];
-    this.todos.forEach((todo, index) => {
-      if (todo === null) todos.splice(index, 0, null);
-    });
-    this.todos = todos;
-    // A known retired ID must not fall back to another task at its old position.
-    for (const id of this.taskIndex.keys()) this.taskIndex.set(id, -1);
-    this.todos.forEach((todo, index) => {
-      if (!todo) return;
-      const ids = idsByContent.get(todo.content)?.shift() ?? [];
-      for (const taskId of ids) this.taskIndex.set(taskId, index);
-    });
+  // Points each live task id at its todo's new index, or retires it with -1 so it can't
+  // fall back to whichever task now holds its old position.
+  private moveTasks(to: (index: number) => number): void {
+    for (const [id, index] of this.taskIndex) if (index >= 0) this.taskIndex.set(id, to(index));
   }
 
   // TaskUpdate names a task by the id TaskCreate returned, or by its 1-based position.
@@ -404,6 +381,7 @@ class Parser {
       mcpErrors: [...this.mcpErrors],
       todos: this.todos,
       taskIndex: [...this.taskIndex],
+      nextTaskId: this.nextTaskId,
       agentCompletions: [...this.agentCompletions],
       agentIdToToolUseId: [...this.agentIdToToolUseId],
       usageById: [...this.usageById],
@@ -424,6 +402,7 @@ class Parser {
     parser.mcpErrors = new Set(s.mcpErrors);
     parser.todos = s.todos;
     parser.taskIndex = new Map(s.taskIndex);
+    parser.nextTaskId = s.nextTaskId;
     parser.agentCompletions = new Map(s.agentCompletions.map(([id, at]) => [id, new Date(at)]));
     parser.agentIdToToolUseId = new Map(s.agentIdToToolUseId);
     parser.usageById = new Map(s.usageById);
@@ -450,7 +429,7 @@ class Parser {
       skills: [...this.skills],
       mcpServers: [...this.mcpServers],
       mcpErrors: [...this.mcpErrors],
-      todos: this.todos.filter((todo): todo is TodoItem => todo !== null),
+      todos: this.todos,
       sessionTokens,
     };
   }
