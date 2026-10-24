@@ -284,12 +284,13 @@ class Parser {
       this.todos.push({ content: content ?? 'Untitled task', status: taskStatus(input?.status) ?? 'pending' });
       const numbered = String(this.nextTaskId++);
       const explicit = typeof input?.taskId === 'string' || typeof input?.taskId === 'number' ? String(input.taskId) : null;
-      for (const id of explicit ? [explicit] : [numbered, block.id as string]) this.taskIndex.set(id, this.todos.length - 1);
+      for (const id of explicit ? [explicit] : [numbered, block.id]) if (id) this.taskIndex.set(id, this.todos.length - 1);
     } else if (toolName === 'TaskUpdate') {
-      const index = this.findTask(input?.taskId) ?? -1;
+      const index = this.findTask(input?.taskId);
+      if (index === null) return;
       const todo = this.todos[index];
-      if (!todo) return;
       if (input?.status === 'deleted') {
+        // Drop the task, retire its ids, and shift later tasks' ids up one.
         this.todos.splice(index, 1);
         this.moveTasks((i) => (i === index ? -1 : i > index ? i - 1 : i));
         return;
@@ -362,11 +363,12 @@ class Parser {
   }
 
   // TaskUpdate names a task by the id TaskCreate returned, or by its 1-based position.
+  // A retired id finds nothing rather than falling back to a position.
   private findTask(taskId: unknown): number | null {
     if (typeof taskId !== 'string' && typeof taskId !== 'number') return null;
     const key = String(taskId);
     const mapped = this.taskIndex.get(key);
-    if (mapped !== undefined) return mapped;
+    if (mapped !== undefined) return mapped >= 0 ? mapped : null;
     const position = /^\d+$/.test(key) ? Number(key) - 1 : -1;
     return position >= 0 && position < this.todos.length ? position : null;
   }
